@@ -1,234 +1,915 @@
-# SMART FENCE: TECHNICAL PROJECT DOCUMENTATION & INTERVIEW COMPENDIUM
+# Smart Fence — Technical Project Explanation
+
+## 1. Project Overview
+
+**Smart Fence** is an AI and IoT-based intelligent safety monitoring system designed to detect and assess potential intrusions near a physical fence before physical contact occurs.
+
+The system combines computer vision, object tracking, spatial analysis, risk assessment, backend services, database storage, a web dashboard, and IoT-based warning hardware.
+
+The core idea is:
+
+```text
+Detect → Track → Analyze Movement → Identify Zone → Assess Risk → Alert
+```
 
 ---
 
-## PART 1: PROJECT EXPLANATION
+## 2. Problem Statement
 
-### 1-Minute Pitch (Elevator Summary)
-> "Traditional perimeter security systems rely on basic tripwires or motion sensors that trigger false alarms whenever a stray animal or tree branch moves, while real electric fences pose lethal electrocution hazards without any early warning.
->
-> **Smart Fence** is an AI and IoT-based intelligent safety monitoring system that replaces simple motion detection with multi-factor threat intelligence: **Detection + Tracking + Directional Analysis + Virtual Perimeter Zones + Dynamic Risk Evaluation**.
->
-> Using YOLOv8 and ByteTrack, the system distinguishes humans from animals, calculates whether they are approaching or retreating from the fence boundary, and evaluates risk across Safe, Warning, and Danger zones. When a high-risk approach is verified, it debounces the alert, persists the incident to an SQLite database, warns operators via a real-time React dashboard, and commands an ESP32 microcontroller over Wi-Fi to sound warning buzzers and flash visual strobe LEDs *before* an intruder reaches the physical fence line."
+Traditional perimeter monitoring systems commonly depend on basic motion sensors, PIR sensors, or break-beam mechanisms.
 
----
+These systems can detect movement, but they have limited ability to understand:
 
-### 2-Minute Pitch (Demonstration Summary)
-> "Good morning examiners. Our project is **Smart Fence**, an AI and IoT-based Intelligent Safety Monitoring System built to prevent perimeter trespassing, railway boundary accidents, and wildlife electrocution.
->
-> In existing systems, a single PIR sensor or break-beam sensor cannot answer fundamental security questions: Is the entity human or animal? Is it coming closer or walking away? And how fast is it approaching?
->
-> Our architecture solves this through an end-to-end pipeline:
-> 1. **Camera Feed & Inference**: A monocular camera captures live video at 30 FPS.
-> 2. **AI Categorization**: YOLOv8 extracts bounding boxes and filters target classes, differentiating humans from livestock or wildlife.
-> 3. **Persistent Tracking**: ByteTrack assigns stable tracking IDs and maintains a temporal history of ground-plane contact points.
-> 4. **Movement Direction Analysis**: A linear trajectory engine fits displacement slopes over sliding time windows to classify movement into `TOWARDS_FENCE`, `AWAY_FROM_FENCE`, or `STATIONARY`.
-> 5. **Spatial Virtual Zones**: The scene is divided into configurable Safe, Warning, and Danger polygons.
-> 6. **Dynamic Risk Engine**: Instead of a binary alarm, the engine assigns structured risk: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. For instance, an animal in the warning zone triggers a low-level visual LED warning, whereas a human charging the danger zone triggers an immediate acoustic siren and high-priority incident log.
-> 7. **IoT Hardware Actuation**: The backend issues RESTful commands over Wi-Fi to an ESP32 microcontroller controlling a multi-tone buzzer and high-intensity LED.
-> 8. **SOC Web Dashboard**: A React and FastAPI application visualizes the annotated MJPEG live feed, real-time SQL statistics, risk distribution analytics, and subsystem health diagnostics.
->
-> Crucially, our prototype isolates high-voltage electrical barriers and uses non-lethal acoustic and visual early warnings to ensure human and animal safety."
+* What caused the movement?
+* Is it a human or an animal?
+* Is the object approaching the fence or moving away?
+* How close is it to the fence?
+* Is the situation actually risky?
+
+Environmental movement such as animals, vegetation, rain, or other disturbances can also result in unnecessary alerts.
+
+The project aims to provide an intelligent monitoring layer that can analyze these factors before generating a high-priority warning.
 
 ---
 
-## PART 2: TECHNICAL DEEP DIVE
+## 3. Proposed Solution
 
-### 1. The Real-World Problem
-Perimeter intrusion detection systems (PIDS) deployed along agricultural borders, railway tracks, industrial yards, and military installations suffer from two fatal extremes:
-1. **High False Alarm Rates (FAR)**: Wind, vegetation, rain, and harmless wildlife constantly trip infrared beams, leading to operator alarm fatigue.
-2. **Lethal Contact Accidents**: Farmers often electrify fences with lethal mains AC voltage to deter boars or elephants, resulting in fatal human and animal electrocutions.
+Smart Fence uses a camera-based AI pipeline to understand the activity near the monitored boundary.
 
-### 2. The Proposed Solution
-A software-defined intelligent perimeter monitoring system that assesses **intent and proximity** using computer vision and edge computing before any physical contact occurs.
+The system:
 
-### 3. Role of Artificial Intelligence & Computer Vision
-Instead of hardcoded pixel differencing (which fails under sunlight changes or rustling leaves), deep learning convolutional/attention models extract semantic features to identify:
-* **Object Category**: `person` $\rightarrow$ classified as Human; `dog`, `cow`, `horse`, `sheep`, `elephant` $\rightarrow$ classified as Animal.
-* **Confidence Filtering**: Any prediction below `CONFIDENCE_THRESHOLD = 0.50` is discarded to suppress detector hallucinations.
+1. Captures a video feed.
+2. Detects humans and animals using YOLOv8.
+3. Tracks detected objects using ByteTrack.
+4. Calculates the object's ground-contact position.
+5. Determines movement direction.
+6. Checks which virtual zone contains the object.
+7. Calculates a risk level.
+8. Generates and stores an alert when required.
+9. Updates the monitoring dashboard.
+10. Sends a warning command to the ESP32.
 
-### 4. Why YOLOv8?
-* **Single-Stage Architecture**: YOLO (You Only Look Once) frames detection as a regression problem, predicting bounding box coordinates and class probabilities simultaneously in one forward pass.
-* **Anchor-Free Detection**: YOLOv8 predicts object centers directly rather than offsets from preset anchor boxes, improving detection speed and generalization for objects of varying scales.
-* **Lightweight Footprint**: `yolov8n` uses only ~3.2 million parameters (~6 MB model size), achieving 30+ FPS inference on standard CPU/laptop architectures without needing dedicated enterprise GPUs.
-
-### 5. Object Tracking (ByteTrack)
-Detection operates on individual frames without temporal memory. Tracking bridges this gap:
-* Maintains track identities ($ID_1, ID_2, \dots$) across frames.
-* Associates detections using bounding box overlap (Intersection over Union - IoU) and motion state estimation (Kalman filtering).
-* Crucially retains track continuity even during temporary visual occlusions.
-
-### 6. Virtual Perimeter Zones & Spatial Geometry
-* The surveillance field of view (FOV) is divided into 3 polygonal geometric regions:
-  - **Safe Zone**: Distant area where presence is normal.
-  - **Warning Zone**: Intermediate perimeter buffer.
-  - **Danger Zone**: Immediate boundary adjacent to the fence line.
-* **Ground-Contact Anchor**: In monocular 2D vision, using the center of the bounding box $(x_{mid}, y_{mid})$ can cause errors if an object is tall. Smart Fence uses the **bottom-center anchor** $(x_{mid}, y_{max})$, representing the object's feet contacting the ground plane.
-* **Point-in-Polygon Mathematics**: Evaluated via OpenCV's `cv2.pointPolygonTest` using the Ray Casting / Jordan Curve theorem.
-
-### 7. Movement Direction Analysis
-* For each track ID, the system records ground positions over time: $[(x_1, y_1, t_1), (x_2, y_2, t_2), \dots]$.
-* Over a sliding window of recent frames, the engine calculates the vertical displacement rate $\frac{\Delta y}{\Delta t}$:
-  - Since the fence line is at the bottom of the camera view, positive displacement ($\Delta y > \text{threshold}$) indicates movement **Towards the Fence**.
-  - Negative displacement ($\Delta y < -\text{threshold}$) indicates movement **Away from the Fence**.
-  - Displacement below `MIN_MOVEMENT_PIXELS` is classified as **Stationary**.
-* Linear regression fitting eliminates frame-to-frame bounding box jitter.
-
-### 8. Risk Assessment Engine & Debouncing
-* Evaluates multi-factor combinations:
-  $$\text{Risk Level} = f(\text{Class}, \text{Zone}, \text{Direction}, \text{Dwell Time})$$
-* **Alert Debouncing**: When an intruder enters a warning or danger zone, an alert is triggered once. A cooldown timer (`ALERT_COOLDOWN_SECONDS = 5.0s`) suppresses repetitive notifications unless the threat escalates (e.g. MEDIUM $\rightarrow$ HIGH $\rightarrow$ CRITICAL).
-
-### 9. Backend & Database Architecture
-* **FastAPI**: Modern asynchronous ASGI framework providing auto-generated OpenAPI documentation, fast request throughput, and WebSocket support.
-* **SQLAlchemy ORM + SQLite**: Structured relational storage for `DetectionRecord`, `AlertRecord`, `ZoneRecord`, and `SystemLog`.
-* **MJPEG Live Streaming**: Transmits video frames via HTTP `multipart/x-mixed-replace` boundaries directly to browser `<img>` elements without needing heavyweight media servers (RTSP/WebRTC).
-
-### 10. IoT Communication & Hardware Control
-* **ESP32 Microcontroller**: Dual-core 240 MHz MCU with built-in Wi-Fi.
-* **Communication Protocol**: Lightweight HTTP REST endpoint (`POST /api/alert`) accepting structured JSON payloads:
-  ```json
-  {"risk": "HIGH", "buzzer": true, "led": true, "reason": "..."}
-  ```
-* **Hardware Output**:
-  - Piezo Buzzer: Driven by ESP32 LEDC PWM timer channels to produce distinct acoustic frequencies (e.g., 2000 Hz warning beep vs 3500 Hz high-pitch alarm siren).
-  - High-Intensity LEDs: Strobe flashing using non-blocking `millis()` timing routines.
-* **Virtual Simulator Fallback**: Automatically activates if physical hardware is absent, ensuring 100% testability.
+This creates an end-to-end monitoring pipeline instead of relying only on a single motion trigger.
 
 ---
 
-## PART 3: 30 TECHNICAL INTERVIEW QUESTIONS & ANSWERS
+# 4. System Architecture
 
-### Section A: AI, Machine Learning & Computer Vision
-
-#### Q1: Why do we use YOLOv8 instead of a traditional classifier like CNN or Haar Cascades?
-**Answer**: Haar Cascades rely on hand-crafted edge and line features, which fail under varying lighting, rotation, and complex outdoor backgrounds. Traditional CNN classifiers classify an already cropped image, requiring a separate region proposal network (like R-CNN), which is too slow for real-time video (2–5 FPS). YOLOv8 is a single-stage detector that predicts bounding boxes and class probabilities simultaneously in a single forward pass, easily achieving 30+ FPS on CPU.
-
-#### Q2: What is the significance of the Confidence Threshold in object detection?
-**Answer**: The confidence threshold is the minimum probability score required for a predicted bounding box to be considered valid. If set too high (e.g., 0.90), genuine objects in poor lighting might be missed (false negatives). If set too low (e.g., 0.15), background noise or shadows might be falsely detected as humans or animals (false positives). In Smart Fence, `CONFIDENCE_THRESHOLD = 0.50` provides an optimal balance between precision and recall.
-
-#### Q3: Why is object detection alone insufficient for an intelligent perimeter system?
-**Answer**: Object detection operates frame-by-frame without memory. It cannot tell whether a detected person in frame 10 is the same person as in frame 11, nor can it determine if the person is standing still, walking away, or charging the fence. Tracking provides temporal continuity, assigning persistent IDs and enabling velocity, direction, and dwell time analysis.
-
-#### Q4: How does ByteTrack differ from basic Centroid Tracking or SORT?
-**Answer**: Basic SORT discards low-confidence detection boxes, which frequently causes lost tracks or ID switches when an object is partially occluded. ByteTrack retains both high- and low-confidence detections, first associating high-score boxes with existing tracks, and then matching remaining unmatched tracks with low-score boxes. This dramatically reduces ID switches in outdoor surveillance scenes.
-
-#### Q5: Why do we use the bottom-center of the bounding box $(x_{mid}, y_{max})$ for zone evaluation instead of the center $(x_{mid}, y_{mid})$?
-**Answer**: In perspective video surveillance, objects stand on the ground plane. The top and center of a human bounding box represent their head and torso, which extend into upper screen coordinates. The bottom-center $(x_{mid}, y_{max})$ corresponds to the entity's ground contact point (their feet), providing accurate spatial positioning against physical perimeter boundary lines.
-
-#### Q6: How does the system determine whether an object is moving towards or away from the fence?
-**Answer**: The system records the ground coordinates $(x_t, y_t)$ over a sliding temporal window. Since the fence is situated at the bottom of the camera view (higher $y$ coordinate in image space), a positive rate of change in $y$ ($\Delta y > 0$) signifies movement towards the fence, while a negative rate of change ($\Delta y < 0$) indicates movement away. A linear regression slope is computed over recent timestamps to filter out single-frame jitter.
-
-#### Q7: What is Non-Maximum Suppression (NMS) in object detection?
-**Answer**: During inference, a detector may produce multiple overlapping bounding boxes around the same object. NMS identifies the box with the highest confidence score and suppresses (discards) any neighboring boxes whose Intersection over Union (IoU) with that box exceeds a set threshold, ensuring exactly one bounding box per detected entity.
-
-#### Q8: What is IoU (Intersection over Union)?
-**Answer**: IoU is an evaluation metric that measures the overlap between two bounding boxes:
-$$\text{IoU} = \frac{\text{Area of Overlap}}{\text{Area of Union}}$$
-It yields a value between 0 (no overlap) and 1 (exact match) and is fundamental for detection evaluation and tracker association.
-
-#### Q9: How can this system be enhanced to estimate physical distance in meters rather than image pixels?
-**Answer**: Monocular cameras suffer from scale ambiguity. To compute real-world metric distance, we could implement:
-1. **Camera Calibration with Homography**: Using known real-world ground markers to compute a perspective transformation matrix mapping image pixels $(u, v)$ to world coordinates $(X, Y)$ on the ground plane.
-2. **Stereo Vision or LiDAR**: Utilizing disparity maps or depth point clouds to calculate true 3D Euclidean distances in meters.
-
-#### Q10: How would you retrain or fine-tune YOLO if we needed to detect specific local wild animals like wild boars or nilgai?
-**Answer**: Collect a custom dataset of annotated images (bounding boxes in YOLO format), freeze the backbone feature extractor weights of a pretrained YOLOv8 model, and fine-tune the detection head over 50–100 epochs using transfer learning. Transfer learning drastically reduces training time and requires far fewer custom images.
-
----
-
-### Section B: IoT, Embedded Systems & Hardware Actuation
-
-#### Q11: Why use an ESP32 microcontroller instead of an Arduino Uno for this project?
-**Answer**: The Arduino Uno has an 8-bit ATmega328P running at 16 MHz with only 2 KB RAM and no native networking. The ESP32 features a 32-bit dual-core Tensilica processor running at 240 MHz, 520 KB SRAM, integrated 2.4 GHz Wi-Fi and Bluetooth, and native PWM hardware timers, allowing it to host HTTP REST servers and parse JSON commands asynchronously.
-
-#### Q12: Why did you choose HTTP REST for ESP32 communication instead of MQTT?
-**Answer**: HTTP REST is client-server, synchronous, and stateless. For a direct local prototype on a Wi-Fi subnet, sending a direct `POST http://<ESP32_IP>/api/alert` eliminates the operational overhead of installing, configuring, and maintaining an external MQTT broker like Mosquitto. However, MQTT remains an excellent alternative for multi-node mesh networks.
-
-#### Q13: How does the ESP32 generate different sound frequencies on the buzzer?
-**Answer**: The ESP32 utilizes its built-in LEDC (LED Control) PWM peripheral channels. By calling `ledcSetup(channel, frequency, resolution)` and `ledcWriteTone(channel, freq)`, we can dynamically modulate the square wave frequency sent to a passive piezoelectric buzzer (e.g., 1000 Hz for medium warnings vs alternating 2800 Hz / 3500 Hz for critical sirens).
-
-#### Q14: Why must the ESP32 code avoid using `delay()` in its main loop?
-**Answer**: The `delay()` function is blocking—it freezes the CPU for the entire duration. If the ESP32 is delaying to flash an LED, it cannot process incoming HTTP requests from the backend or maintain Wi-Fi keep-alive packets, resulting in dropped alerts and socket timeouts. Non-blocking timing using `millis()` checks elapsed timestamps while allowing `server.handleClient()` to execute continuously.
-
-#### Q15: What happens if the Wi-Fi connection or backend server fails?
-**Answer**: The ESP32 implements an automatic safety timeout: if it enters an alarm state and receives no subsequent heartbeat or reset command within 15 seconds, it automatically downgrades its risk state to `LOW` and mutes the buzzer. When Wi-Fi disconnects, it attempts non-blocking reconnection attempts while keeping local fail-safe states active.
-
-#### Q16: Why should this prototype NEVER be directly connected to a real electric fence?
-**Answer**: Real agricultural electric fences operate at pulsed voltages between 2,000V and 10,000V with low amperage designed to shock livestock. Connecting a 3.3V/5V DC microcontroller directly to a high-voltage energizer would destroy the semiconductor circuitry, pose severe fire risks, and create lethal electrocution hazards for the operator. The prototype must remain electrically isolated, using buzzers and LEDs as non-lethal indicators.
+```text
+                         Camera Feed
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │      YOLOv8      │
+                    │ Object Detection │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │    ByteTrack     │
+                    │ Object Tracking  │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │ Ground Point & Movement│
+                 │      Analysis          │
+                 └────────────┬───────────┘
+                              │
+                              ▼
+                 ┌────────────────────────┐
+                 │   Virtual Zone Engine  │
+                 │ Safe / Warning / Danger│
+                 └────────────┬───────────┘
+                              │
+                              ▼
+                 ┌────────────────────────┐
+                 │     Risk Assessment    │
+                 │ LOW / MEDIUM / HIGH /  │
+                 │        CRITICAL         │
+                 └────────────┬───────────┘
+                              │
+              ┌───────────────┼────────────────┐
+              │               │                │
+              ▼               ▼                ▼
+        ┌──────────┐   ┌─────────────┐   ┌──────────┐
+        │  SQLite  │   │   React     │   │  ESP32   │
+        │ Database │   │  Dashboard  │   │ Buzzer + │
+        │          │   │             │   │   LED    │
+        └──────────┘   └─────────────┘   └──────────┘
+```
 
 ---
 
-### Section C: Backend, Architecture & Databases
+# 5. Complete Working Flow
 
-#### Q17: Why did you select FastAPI instead of Flask or Django?
-**Answer**:
-1. **Asynchronous Architecture**: FastAPI is built on Starlette and ASGI, natively handling concurrent async I/O operations (such as streaming MJPEG video and WebSockets) with much higher throughput than Flask.
-2. **Data Validation via Pydantic**: Incoming payloads are strictly validated against type hints automatically.
-3. **Automatic OpenAPI/Swagger Documentation**: Interactive API documentation is generated automatically at `/docs`.
+### Step 1 — Camera Capture
 
-#### Q18: What is MJPEG streaming and how does it deliver video to the React frontend?
-**Answer**: MJPEG (Motion JPEG) is an HTTP streaming technique using the MIME type `multipart/x-mixed-replace; boundary=frame`. The server keeps the HTTP connection open and continuously pushes individual JPEG compressed frames separated by boundary delimiters. The browser's native `<img>` tag replaces the current image with each incoming frame, providing smooth real-time video without complex client-side video decoders.
+The camera provides the video frames to the AI pipeline.
 
-#### Q19: What is Alert Debouncing and why is it critical in Computer Vision pipelines?
-**Answer**: A video pipeline operates at 20–30 frames per second. If an intruder stands inside a danger zone for 5 seconds, a raw detection system would generate 150 duplicate alerts and spam the database, network, and IoT buzzer. Debouncing enforces an `ALERT_COOLDOWN_SECONDS` per track ID, firing an alert upon first detection or risk escalation, and suppressing duplicate alerts while the threat level remains unchanged.
+The system can process a physical camera feed when available.
 
-#### Q20: How are the database tables designed and indexed?
-**Answer**:
-* `detections`: Stores individual target tracks with indexed foreign lookups on `tracking_id`, `zone`, `risk_level`, and `timestamp`.
-* `alerts`: Stores escalated security incidents with `risk_level`, `status`, and `acknowledged` flags.
-* `zones`: Stores polygonal boundary coordinates in JSON format for dynamic reconfiguration without database migrations.
-* `system_logs`: Records subsystem health events.
-Indexes on `timestamp` and `risk_level` ensure that dashboard aggregation queries (`COUNT`, `GROUP BY`) execute in milliseconds.
-
-#### Q21: What is the role of WebSockets in the Smart Fence architecture?
-**Answer**: While the frontend polls REST endpoints for periodic statistics, WebSockets provide a full-duplex persistent TCP connection (`/ws/live`). Whenever the AI pipeline detects a critical intrusion, the backend pushes an instant JSON broadcast over the WebSocket, allowing the dashboard to react immediately without waiting for the next polling cycle.
-
-#### Q22: What design pattern is used in the AI Pipeline?
-**Answer**: The pipeline implements the **Pipes and Filters** architectural pattern. Video frames pass sequentially through modular, decoupled stages:
-`Camera Capture` $\rightarrow$ `Detection Filter` $\rightarrow$ `Tracking Filter` $\rightarrow$ `Zone Filter` $\rightarrow$ `Movement Filter` $\rightarrow$ `Risk Assessment Filter` $\rightarrow$ `Annotation & Dispatch`. Each filter performs a single responsibility and can be modified or tested independently.
+If the physical camera is unavailable, the project can use a synthetic feed for demonstration and testing.
 
 ---
 
-### Section D: Frontend, Diagnostics & Security
+### Step 2 — Object Detection
 
-#### Q23: Why use Vite instead of Create React App (CRA)?
-**Answer**: Create React App relies on Webpack, which bundles the entire application before starting the dev server, resulting in slow startup times and lagging Hot Module Replacement (HMR). Vite leverages native ES Modules (ESM) in modern browsers and uses esbuild (written in Go) for pre-bundling dependencies, resulting in instant server start (< 300ms) and lightning-fast HMR.
+Each frame is processed using **YOLOv8**.
 
-#### Q24: How does the frontend handle camera feed disconnections or network drops?
-**Answer**: The `LiveMonitor` component listens to the `<img>` element's `onError` event. If the video stream drops, the element hides itself and renders a stylized fallback banner with a manual "Reconnect" button. Additionally, the header polls `/api/system/status` every 2.5 seconds to reflect `SYSTEM OFFLINE` when the backend cannot be reached.
+The detector identifies objects and provides:
 
-#### Q25: Why is the dashboard styled with a Dark SOC (Security Operations Center) theme?
-**Answer**: Security operations dashboards are designed for 24/7 operator environments. Dark themes reduce operator eye strain in low-light control rooms, while high-contrast visual status indicators (Emerald for Safe, Amber for Warning, Orange for High, Crimson for Critical) draw immediate peripheral attention to active perimeter breaches.
+* Bounding box
+* Class
+* Confidence score
 
-#### Q26: What is the purpose of the Alert Acknowledgment feature?
-**Answer**: In operational security, detecting a breach is only half the workflow; human operators must verify and respond to incidents. The `PUT /api/alerts/{id}/ack` endpoint updates the incident's status from `ACTIVE` to `ACKNOWLEDGED`, establishing operator accountability in the audit trail.
+Relevant detected classes are categorized as humans or animals.
+
+A confidence threshold is applied to reduce low-confidence detections.
+
+```text
+Camera Frame
+     ↓
+YOLOv8
+     ↓
+Bounding Box + Class + Confidence
+```
 
 ---
 
-### Section E: Software Engineering, Testing & Edge Cases
+### Step 3 — Object Tracking
 
-#### Q27: How does the system handle total physical camera failure?
-**Answer**: The `CameraManager` class implements an automated fallback mechanism: if `cv2.VideoCapture` fails to open a physical device or encounters read errors, it seamlessly switches to the internal `SyntheticFeedGenerator`. This generator simulates ground perspective, fence posts, wires, and animated approaching human/animal silhouettes, allowing continuous testing and demonstration without hardware dependencies.
+YOLOv8 detects objects independently in each frame.
 
-#### Q28: How do you verify the system through automated tests?
-**Answer**: We wrote a 15-scenario test suite in Pytest (`tests/test_smart_fence.py`) validating:
-* Spatial zone containment for safe, warning, and danger coordinates.
-* Directional classification (`TOWARDS_FENCE`, `AWAY_FROM_FENCE`, `STATIONARY`).
-* Risk escalation for humans vs animals.
-* Stationary noise rejection below threshold.
-* Tracker isolation across multiple simultaneous targets.
-* Debouncing and cooldown duration enforcement.
-* Fail-safe behavior when the camera or ESP32 is disconnected.
+To maintain the identity of an object across multiple frames, the system uses **ByteTrack**.
 
-#### Q29: What are the main limitations of the current system?
-**Answer**:
-1. **Monocular 2D Geometry**: Cannot calculate metric distance in physical meters without camera calibration or depth sensors.
-2. **Nighttime Darkness**: Standard visible-light webcams fail in zero-lux darkness unless paired with external IR illuminators or thermal cameras.
-3. **Severe Weather**: Heavy rain, fog, or lens occlusion can degrade optical bounding box confidence.
+Example:
 
-#### Q30: If given another semester, what three major enhancements would you add?
-**Answer**:
-1. **Stereo Vision or LiDAR Integration**: For centimeter-accurate 3D physical distance estimation.
-2. **Thermal Imaging & Edge TPU Deployment**: Deploying lightweight quantized models on an NVIDIA Jetson Orin Nano with FLIR thermal vision for pitch-black night monitoring.
-3. **PTZ Auto-Slew & Drone Dispatch**: Automatically commanding motorized Pan-Tilt-Zoom (PTZ) cameras or autonomous security quadcopters to track high-risk intruders.
+```text
+Frame 1 → Person → ID 1
+Frame 2 → Person → ID 1
+Frame 3 → Person → ID 1
+Frame 4 → Person → ID 1
+```
+
+Maintaining the same tracking ID allows the system to analyze movement over time.
+
+---
+
+# 6. Why YOLOv8?
+
+YOLOv8 is used because the project requires object detection from a continuous video stream.
+
+Compared with traditional approaches, YOLO-based detection provides:
+
+* Object localization
+* Object classification
+* Confidence scores
+* Support for multiple objects
+* Practical real-time inference
+
+The project uses the lightweight **YOLOv8n** model to keep inference computationally practical.
+
+---
+
+# 7. Confidence Threshold
+
+Every YOLO detection has a confidence score.
+
+The project uses a configurable confidence threshold:
+
+```text
+CONFIDENCE_THRESHOLD = 0.50
+```
+
+Detections below the configured threshold are ignored.
+
+The threshold provides a trade-off:
+
+```text
+Higher Threshold
+    ↓
+Fewer low-confidence detections
+    +
+Possibility of missing difficult objects
+
+Lower Threshold
+    ↓
+More detections
+    +
+Possibility of more false positives
+```
+
+The value can be adjusted according to the camera environment and required detection sensitivity.
+
+---
+
+# 8. Why ByteTrack?
+
+Detection alone cannot provide temporal information.
+
+For example, YOLO can detect a person in multiple frames, but the system needs to know whether those detections represent the same person.
+
+ByteTrack maintains track identities and provides persistent tracking IDs.
+
+This enables:
+
+* Movement analysis
+* Direction detection
+* Dwell-time calculation
+* Track history
+* Multi-object monitoring
+
+Therefore:
+
+```text
+YOLOv8  → What is detected?
+ByteTrack → Which object is it over time?
+```
+
+---
+
+# 9. Ground-Contact Point
+
+For zone evaluation, Smart Fence uses the **bottom-center of the bounding box**.
+
+If the bounding box is:
+
+```text
+(x_min, y_min)
+       ┌────────────┐
+       │            │
+       │   Object   │
+       │            │
+       └─────●──────┘
+       (x_mid, y_max)
+```
+
+The ground point is:
+
+```text
+x_mid = (x_min + x_max) / 2
+y_ground = y_max
+```
+
+So:
+
+```text
+Ground Point = (x_mid, y_max)
+```
+
+### Why?
+
+The center of a person's bounding box usually represents the torso.
+
+The bottom-center is closer to the person's feet and therefore provides a better representation of where the object is positioned on the ground.
+
+---
+
+# 10. Virtual Perimeter Zones
+
+The monitored camera view is divided into three virtual zones.
+
+### Safe Zone
+
+The area relatively far from the physical fence.
+
+### Warning Zone
+
+The intermediate area where the system increases monitoring attention.
+
+### Danger Zone
+
+The area immediately near the monitored fence boundary.
+
+The zones are represented using polygons.
+
+The system checks whether the object's ground-contact point lies inside a particular polygon.
+
+OpenCV's:
+
+```text
+cv2.pointPolygonTest()
+```
+
+is used for this spatial evaluation.
+
+---
+
+# 11. Movement Direction Analysis
+
+The system stores recent ground positions for every tracking ID.
+
+For example:
+
+```text
+ID 1:
+
+(x1, y1, t1)
+(x2, y2, t2)
+(x3, y3, t3)
+(x4, y4, t4)
+```
+
+The recent trajectory is analyzed to determine movement.
+
+Because the fence is positioned towards the lower part of the camera view:
+
+```text
+Increasing Y
+     ↓
+Closer to Fence
+
+Decreasing Y
+     ↓
+Away from Fence
+```
+
+The system classifies movement as:
+
+```text
+TOWARDS_FENCE
+AWAY_FROM_FENCE
+STATIONARY
+```
+
+A sliding window and linear trend analysis are used to reduce the effect of frame-to-frame bounding-box jitter.
+
+---
+
+# 12. Risk Assessment
+
+The project does not treat every detection as the same type of threat.
+
+The Risk Engine considers multiple factors:
+
+```text
+Object Class
+     +
+Zone
+     +
+Direction
+     +
+Dwell Time
+     ↓
+Risk Level
+```
+
+Possible risk levels are:
+
+```text
+LOW
+MEDIUM
+HIGH
+CRITICAL
+```
+
+For example, an animal in a warning zone and a human moving towards the fence in a danger zone can be treated differently by the risk engine.
+
+The purpose is to make alerts more context-aware rather than simply triggering whenever motion is detected.
+
+---
+
+# 13. Alert Debouncing
+
+A video pipeline can process many frames per second.
+
+If an object remains in a danger zone for several seconds, the same event may appear in many consecutive frames.
+
+Without debouncing:
+
+```text
+One Incident
+     ↓
+Many Frames
+     ↓
+Many Duplicate Alerts
+```
+
+Smart Fence uses an alert cooldown:
+
+```text
+ALERT_COOLDOWN_SECONDS = 5
+```
+
+After an alert is generated, repetitive alerts for the same continuing condition are suppressed during the cooldown period.
+
+However, if the threat level increases, a new alert can be generated.
+
+Example:
+
+```text
+MEDIUM
+   ↓
+HIGH
+   ↓
+CRITICAL
+```
+
+This prevents alert flooding while still allowing important risk escalation to be reported.
+
+---
+
+# 14. Backend Architecture
+
+The backend is developed using **FastAPI**.
+
+It acts as the communication layer between:
+
+* AI pipeline
+* Database
+* Frontend
+* ESP32
+
+Main backend responsibilities include:
+
+* Processing application requests
+* Providing REST APIs
+* Managing database operations
+* Providing system status
+* Handling alerts
+* Providing live video streaming
+* Broadcasting real-time events
+
+---
+
+# 15. REST API
+
+REST APIs are used for communication between the backend and other system components.
+
+For example, the backend can send an alert command to the ESP32.
+
+Example:
+
+```http
+POST /api/alert
+```
+
+Payload:
+
+```json
+{
+  "risk": "HIGH",
+  "buzzer": true,
+  "led": true,
+  "reason": "Human approaching danger zone"
+}
+```
+
+This allows the backend to control the warning hardware without directly handling the hardware logic itself.
+
+---
+
+# 16. WebSocket Communication
+
+REST APIs are suitable for normal request-response operations.
+
+For events that need to reach the dashboard immediately, the project uses WebSockets.
+
+Flow:
+
+```text
+AI Pipeline
+     ↓
+Risk Escalation
+     ↓
+FastAPI Backend
+     ↓
+WebSocket
+     ↓
+React Dashboard
+```
+
+This allows the dashboard to receive important live events without waiting for a normal polling cycle.
+
+---
+
+# 17. MJPEG Live Streaming
+
+The annotated camera feed is delivered to the frontend using **MJPEG streaming**.
+
+The backend continuously sends JPEG frames through an HTTP multipart response.
+
+Conceptually:
+
+```text
+JPEG Frame 1
+     ↓
+JPEG Frame 2
+     ↓
+JPEG Frame 3
+     ↓
+JPEG Frame 4
+     ↓
+     ...
+```
+
+The browser can display the stream directly through an image element.
+
+This provides a relatively simple approach for displaying the annotated video feed in the web dashboard.
+
+---
+
+# 18. Database Design
+
+The project uses:
+
+**SQLite + SQLAlchemy ORM**
+
+SQLite provides lightweight local relational storage, while SQLAlchemy provides structured interaction with the database.
+
+Important entities include:
+
+### Detection Records
+
+Stores information related to detected and tracked objects.
+
+### Alert Records
+
+Stores generated security incidents and their status.
+
+### Zone Records
+
+Stores configurable virtual-zone information.
+
+### System Logs
+
+Stores system and subsystem events.
+
+Conceptually:
+
+```text
+Detection
+    │
+    ├── Tracking ID
+    ├── Object Class
+    ├── Zone
+    ├── Risk Level
+    └── Timestamp
+
+Alert
+    │
+    ├── Risk Level
+    ├── Status
+    ├── Acknowledgment
+    └── Timestamp
+```
+
+---
+
+# 19. IoT Layer — ESP32
+
+The ESP32 provides the physical warning layer of the project.
+
+Communication flow:
+
+```text
+FastAPI
+   │
+   │ Wi-Fi / HTTP
+   ▼
+ESP32
+   │
+   ├── Buzzer
+   │
+   └── LED
+```
+
+When the backend identifies a relevant risk condition, it can send an alert command to the ESP32.
+
+The ESP32 then activates the configured warning output.
+
+---
+
+# 20. Buzzer and LED Control
+
+The ESP32 controls:
+
+* Piezo buzzer
+* High-intensity LEDs
+
+Different alert levels can be represented using different buzzer frequencies or patterns and different LED behaviors.
+
+For example:
+
+```text
+Warning  → Lower-intensity indication
+High     → Stronger buzzer / LED indication
+Critical → High-priority warning pattern
+```
+
+The exact output behavior is controlled by the ESP32 firmware.
+
+---
+
+# 21. Why Non-Blocking Timing Is Used
+
+The ESP32 should remain responsive to network requests while controlling LEDs and the buzzer.
+
+Using long blocking `delay()` calls can prevent the controller from handling other tasks promptly.
+
+Therefore, timing logic based on:
+
+```text
+millis()
+```
+
+can be used to perform non-blocking LED and alarm patterns.
+
+This allows the ESP32 to continue handling communication while the warning indicators are active.
+
+---
+
+# 22. ESP32 Fail-Safe Behavior
+
+The hardware layer considers communication failures.
+
+If the expected communication from the backend is lost, the ESP32 can use a timeout mechanism rather than keeping an old alarm state active indefinitely.
+
+The prototype therefore includes a safety-oriented fallback behavior for communication failures.
+
+---
+
+# 23. React Dashboard
+
+The frontend is developed using:
+
+* React
+* Vite
+
+The dashboard acts as the operator interface.
+
+It provides visualization of:
+
+* Live annotated camera feed
+* Detection information
+* Risk statistics
+* Alert history
+* System status
+* System health
+* Alert acknowledgment
+
+The dashboard communicates with the FastAPI backend through REST APIs and WebSockets.
+
+---
+
+# 24. Dashboard Alert Acknowledgment
+
+When an alert is generated, the operator can review and acknowledge it.
+
+Conceptually:
+
+```text
+ACTIVE ALERT
+     ↓
+Operator Reviews
+     ↓
+ACKNOWLEDGED
+```
+
+This creates a basic incident-handling workflow instead of treating an alert as a simple notification.
+
+---
+
+# 25. Camera Fallback
+
+The project supports a synthetic camera feed when a physical camera is unavailable.
+
+The flow is:
+
+```text
+Physical Camera
+      │
+      ├── Available
+      │      ↓
+      │   Live Feed
+      │
+      └── Unavailable
+             ↓
+       Synthetic Feed
+```
+
+The synthetic feed can simulate a monitored scene and moving targets.
+
+This is useful for:
+
+* Development
+* Testing
+* Demonstration
+* Debugging
+
+It also reduces dependency on physical camera hardware during project presentation.
+
+---
+
+# 26. Testing
+
+The project uses **Pytest** for automated testing.
+
+The tests cover important decision-making components such as:
+
+* Safe-zone classification
+* Warning-zone classification
+* Danger-zone classification
+* Movement direction
+* Stationary movement rejection
+* Risk escalation
+* Multiple tracking IDs
+* Alert debouncing
+* Camera failure behavior
+* ESP32 communication failure behavior
+
+Testing these components separately helps verify the core logic before relying on the complete live-video pipeline.
+
+---
+
+# 27. Project Design Pattern
+
+The AI processing pipeline follows a **Pipes and Filters** style architecture.
+
+```text
+Camera Capture
+      ↓
+Detection
+      ↓
+Tracking
+      ↓
+Zone Evaluation
+      ↓
+Movement Analysis
+      ↓
+Risk Assessment
+      ↓
+Annotation
+      ↓
+Alert / Dispatch
+```
+
+Each stage performs a specific task.
+
+This separation makes individual components easier to understand, modify, and test.
+
+---
+
+# 28. Technology Stack
+
+| Layer                  | Technology | Purpose                        |
+| ---------------------- | ---------- | ------------------------------ |
+| Object Detection       | YOLOv8     | Detect humans and animals      |
+| Object Tracking        | ByteTrack  | Maintain object identities     |
+| Computer Vision        | OpenCV     | Image processing and geometry  |
+| Backend                | FastAPI    | APIs and application logic     |
+| Validation             | Pydantic   | Validate API data              |
+| Database               | SQLite     | Store application data         |
+| ORM                    | SQLAlchemy | Database interaction           |
+| Frontend               | React      | Monitoring dashboard           |
+| Build Tool             | Vite       | Frontend development           |
+| Real-Time Events       | WebSocket  | Live dashboard updates         |
+| Video Streaming        | MJPEG      | Live annotated feed            |
+| IoT Controller         | ESP32      | Hardware alert control         |
+| Hardware Communication | HTTP/REST  | Backend-to-ESP32 communication |
+| Testing                | Pytest     | Automated testing              |
+
+---
+
+# 29. Security and Safety Considerations
+
+The project is designed as a **prototype early-warning system**.
+
+The ESP32 hardware should remain electrically isolated from any high-voltage electric fence system.
+
+The prototype uses:
+
+```text
+AI Detection
+     ↓
+Risk Decision
+     ↓
+Non-Lethal Warning
+     ↓
+Buzzer + LED
+```
+
+It does not directly control or energize a high-voltage fence.
+
+This separation is important for protecting both people and the prototype electronics.
+
+---
+
+# 30. Current Limitations
+
+### Monocular Camera
+
+A single camera provides image coordinates rather than direct physical distance.
+
+The current system therefore does not provide reliable real-world distance measurements in meters.
+
+### Nighttime Conditions
+
+A normal visible-light camera may perform poorly in very low-light environments.
+
+### Weather Conditions
+
+Heavy rain, fog, dust, or lens obstruction can reduce object-detection quality.
+
+### Model Dependency
+
+Detection performance depends on the trained model, camera quality, scene conditions, and target appearance.
+
+---
+
+# 31. Future Enhancements
+
+### Metric Distance Estimation
+
+Camera calibration and homography can map image coordinates to real-world ground coordinates.
+
+### Stereo Vision / LiDAR
+
+Depth sensors can provide more direct physical distance information.
+
+### Thermal Imaging
+
+Thermal cameras can improve detection in low-light and nighttime environments.
+
+### Edge AI
+
+The AI pipeline can be deployed on dedicated edge-computing hardware.
+
+### PTZ Camera
+
+A PTZ camera could automatically focus on high-risk targets.
+
+### Multi-Camera Monitoring
+
+Multiple cameras could provide wider perimeter coverage.
+
+### Cloud Monitoring
+
+Security events could be synchronized to a cloud platform for remote monitoring and historical analytics.
+
+---
+
+# 32. End-to-End Example
+
+Consider a person entering the monitored area.
+
+```text
+Person enters camera view
+          ↓
+YOLOv8 detects person
+          ↓
+ByteTrack assigns Tracking ID
+          ↓
+Bottom-center ground point calculated
+          ↓
+Object enters Warning Zone
+          ↓
+Movement history analyzed
+          ↓
+Object is moving TOWARDS_FENCE
+          ↓
+Risk Engine evaluates the situation
+          ↓
+Risk level increases
+          ↓
+Alert generated
+          ↓
+Alert stored in SQLite
+          ↓
+Dashboard receives live event
+          ↓
+ESP32 receives HTTP command
+          ↓
+Buzzer + LED activated
+```
+
+This example represents the complete project workflow from **camera input to AI analysis to software and hardware response**.
+
+---
+
+# 33. Project Summary
+
+Smart Fence integrates multiple technologies into one intelligent monitoring workflow:
+
+```text
+Computer Vision
+       +
+Object Tracking
+       +
+Spatial Analysis
+       +
+Risk Assessment
+       +
+Backend
+       +
+Database
+       +
+Web Dashboard
+       +
+IoT Hardware
+```
+
+The main technical idea is to move beyond simple motion detection and use multiple contextual factors—**object type, location, movement, and time**—to make the monitoring system more informative and responsive.
+
+The prototype focuses on providing an **early, non-lethal warning** before an individual or animal reaches the physical fence.
