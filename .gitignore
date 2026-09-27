@@ -1,0 +1,16 @@
+.env
+node_modules/
+__pycache__/
+.venv/
+venv/
+dist/
+build/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.pth
+*.onnx
+.vscode/
+.idea/
